@@ -465,7 +465,7 @@ modelo_desp = fab_final(h_elegido).fit(datos[X_COLS], datos.y)   # mismo modelo 
 futuro['p'] = modelo_desp.predict_proba(futuro[X_COLS])[:, 1]
 nombres = g.sort_values('periodo').assign(nom=lambda d: d.nombre_grupo.astype(str).map(norm).str.replace(r'\s+[CS]\dG\d+\s*$', '', regex=True)).groupby('cod_materia').nom.last()
 futuro['materia'] = futuro.cod_materia.map(nombres)
-joblib.dump({'modelo': modelo_desp, 'umbral': U, 'X_COLS': X_COLS}, 'modelo/modelo_horario_operacion.joblib')
+joblib.dump({'modelo': modelo_desp, 'umbral': U, 'X_COLS': X_COLS, 'nombre': elegido, 'hiper': h_elegido}, 'modelo/modelo_horario_operacion.joblib')
 futuro[['cod_materia','materia','franja','dia','jornada','p']].to_csv('modelo/predicciones_2026-2.csv', index=False)
 futuro[['cod_materia','materia','franja'] + X_COLS].to_csv('modelo/variables_2026-2.csv', index=False)   # entrada del servicio app.py
 print(futuro.shape, '→ modelo/predicciones_2026-2.csv')
@@ -475,8 +475,8 @@ def recomendar(franjas_actuales, materias_pendientes, pred=futuro, umbral=U):
     perfil = set(franjas_actuales); usadas = set(); salida = []
     for m in materias_pendientes:
         c = pred[(pred.cod_materia == m)].sort_values('p', ascending=False)
-        pref = c[c.franja.isin(perfil) & ~c.franja.isin(usadas)]
-        if len(pref) and pref.iloc[0].p >= umbral and not pref.iloc[0].franja.startswith('SAB'):  # sábados: siempre a mano
+        pref = c[c.franja.isin(perfil) & ~c.franja.isin(usadas) & ~c.franja.str.startswith('SAB')]   # sábados fuera ANTES de elegir
+        if len(pref) and pref.iloc[0].p >= umbral:
             r = pref.iloc[0]; usadas.add(r.franja); salida.append({'materia': r.materia, 'franja': r.franja, 'prob': round(r.p, 2), 'accion': 'PRE-RESERVAR'})
         else:
             alt = c[~c.franja.isin(usadas)].head(1)
@@ -492,3 +492,43 @@ print(recomendar(['SAB_MAN', 'MAR_NOC', 'JUE_NOC'], sab + noc + otra).to_string(
 
 # %% [markdown]
 # **Para operarlo de verdad:** cada semestre, al publicarse la programación oficial, se compara lo pre-reservado con lo que se abrió (precisión real de las reservas). Si la precisión cae por debajo de la de la regla de persistencia durante un periodo, o si cambia el catálogo de códigos, se reentrena con el periodo nuevo. El modelo **sugiere**; la reserva definitiva la confirma el estudiante o Registro.
+
+# %% [markdown]
+# ## 7. Validación prospectiva con 2026-2 (después de la entrega)
+# Las predicciones de 2026-2 de la sección 6 quedaron guardadas en `modelo/predicciones_2026-2.csv` **antes** de conocer la programación de 2026-2. Después se descargó la programación oficial de 2026-2 del portal de la EAN (carpeta `datos_validacion/`). Del archivo se quitó solo la hoja consolidada `PRE-PRES` (más de un millón de filas vacías, unos 20 MB) para respetar el límite de tamaño de GitHub; las hojas por facultad, que son las que se leen, quedan intactas. Aquí se compara lo predicho con lo que de verdad se abrió. **Nada del modelo ni del umbral se cambia:** es una segunda prueba, con datos que el modelo nunca vio.
+#
+# Se aplica el mismo supuesto de decisión: se evalúan las materias con historia que abren en 2026-2.
+
+# %%
+RUTA_VAL = 'datos_validacion/Programacion_PREGRADO_PRESENCIAL_2026-2.xlsx'
+val = pd.concat([leer_hoja(RUTA_VAL, h, '2026-2') for h in FACULTADES], ignore_index=True)
+val['cod_materia'] = val['codigo_raw'].astype(str).str.strip().str.upper().str[:8]
+gv = val.dropna(subset=['hora_ini']); gv = gv[gv[dias].sum(1).between(1, 6)].copy()
+gv['jornada'] = pd.cut(gv.hora_ini, [-1, 11.99, 17.99, 25], labels=['MAN','TAR','NOC']).astype(str)
+lv = gv.melt(id_vars=['cod_materia','jornada'], value_vars=dias, var_name='dia', value_name='m'); lv = lv[lv.m == 1]
+abiertas_v = set(zip(lv.cod_materia, lv.dia + '_' + lv.jornada)); mats_v = set(gv.cod_materia)
+ev = futuro[futuro.cod_materia.isin(mats_v)].copy()
+ev['y'] = [int((m, f) in abiertas_v) for m, f in zip(ev.cod_materia, ev.franja)]
+print('Grupos 2026-2:', len(val), '| materias que abren:', len(mats_v), '| con historia (evaluables):', ev.cod_materia.nunique(),
+      '| sin historia (fuera de alcance):', len(mats_v - set(futuro.cod_materia)))
+print('Pares evaluados:', len(ev), '| tasa real de apertura:', round(ev.y.mean(), 3), '| sesiones de sábado en 2026-2:', int(lv.dia.eq('SAB').sum()))
+m_v = metricas(ev.y.values, ev.p.values, U); b_v = metricas(ev.y.values, ev.lag1_franja.values.astype(float), 0.5)
+n_v = {'pr_auc': np.nan, 'precision': np.nan, 'recall': 0.0, 'f1': 0.0, 'costo100': costo(ev.y.values, np.zeros(len(ev)), 0.5)}
+print('\nVALIDACIÓN 2026-2 (umbral', U, 'fijado en validación, sin cambios)')
+print(pd.DataFrame({'modelo': m_v, 'persistencia': b_v, 'no reservar nada': n_v}).round(3).to_string())
+idx_v = ev.reset_index(drop=True).groupby('cod_materia').indices; ms_v = list(idx_v); evr = ev.reset_index(drop=True)
+rng = np.random.default_rng(SEMILLA); bv = []
+for _ in range(500):
+    s = np.concatenate([idx_v[m] for m in rng.choice(ms_v, len(ms_v), replace=True)]); y_ = evr.y.values[s]
+    bv.append({'pr_auc': average_precision_score(y_, evr.p.values[s]), 'prec': precision_score(y_, (evr.p.values[s] >= U).astype(int), zero_division=0),
+               'ahorro': costo(y_, evr.lag1_franja.values[s].astype(float), 0.5) - costo(y_, evr.p.values[s], U)})
+bv = pd.DataFrame(bv); icv = lambda c: f'[{bv[c].quantile(.025):.3f}; {bv[c].quantile(.975):.3f}]'
+print('IC95% PR-AUC:', icv('pr_auc'), '| IC95% precisión:', icv('prec'), '| IC95% ahorro (persistencia − modelo) por 100 decisiones:', icv('ahorro'))
+calv = ev.assign(tramo=pd.cut(ev.p, [0, .3, .5, .7, 1.0], include_lowest=True)).groupby('tramo', observed=True).agg(n=('y','size'), p_media=('p','mean'), tasa_real=('y','mean'))
+print('\nCalibración en 2026-2:'); print(calv.round(3).to_string())
+print('\nEjemplo del informe:'); print(ev[ev.franja.isin(['MAR_NOC','JUE_NOC']) & ev.materia.isin(['CALCULO INTEGRAL','CALCULO DIFERENCIAL'])][['materia','franja','p','y']].round(2).to_string(index=False))
+ev_g = ev.assign(pred=(ev.p >= U).astype(int)).groupby('jornada').apply(lambda d: pd.Series({'tasa_real': d.y.mean(), 'precision': precision_score(d.y, d.pred, zero_division=0), 'recall': recall_score(d.y, d.pred, zero_division=0)}))
+print('\nPor jornada:'); print(ev_g.round(3).to_string())
+
+# %% [markdown]
+# **Lectura.** Con dos semestres de prueba la conclusión es más sólida que con uno. En 2026-1 la regla de persistencia tuvo menor costo; en 2026-2, con el mismo modelo y el mismo umbral, el modelo tuvo menor costo que la persistencia y que no reservar. En ambos semestres el modelo ordenó mejor (mayor PR-AUC) y sus reservas fueron más precisas. 2026-2 tampoco tuvo sesiones presenciales de pregrado el sábado, lo que respalda la regla de enviar los sábados a revisión manual.

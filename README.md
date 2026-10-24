@@ -11,8 +11,10 @@ Predice en qué **día y jornada** se ofrecerá cada materia el próximo semestr
 | `ficha_datos.md` | Ficha de datos |
 | `declaracion_IA.md` | Declaración de uso de IA |
 | `anexo_B_datos_reales.md` | Evidencia del bono de datos reales |
-| `datos_crudos/` | 8 archivos .xlsx originales |
-| `app.py` | Servicio de despliegue (Streamlit) |
+| `datos_crudos/` | 8 archivos .xlsx originales (2022-2 a 2026-1) |
+| `datos_validacion/` | Programación oficial 2026-2, usada solo para la validación prospectiva (cuaderno §7). Se quitó la hoja consolidada `PRE-PRES` (filas vacías, 20 MB) por el límite de GitHub; las hojas por facultad están intactas |
+| `app.py` | Servicio de despliegue (Streamlit): la interfaz |
+| `recomendador.py` | Lógica de pre-reserva que usa la app (carga el modelo y propone el horario) |
 | `modelo/` | Modelo guardado y variables para 2026-2 (los genera el cuaderno) |
 
 ## Reproducir
